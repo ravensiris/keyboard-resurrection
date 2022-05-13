@@ -20,7 +20,10 @@ use bsp::hal::{
 };
 
 use bitvec::prelude::*;
+use heapless::spsc::Queue;
 use itertools::enumerate;
+
+static mut MESSAGE_QUEUE: Queue<usize, 128> = Queue::new();
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 fn core1_task() -> ! {
@@ -65,6 +68,7 @@ fn core1_task() -> ! {
     }
 
     let mut prev_state = bitarr![u32, Lsb0; 0; 49];
+    let (mut prod, _) = unsafe { MESSAGE_QUEUE.split() };
     loop {
         for (n_row, row) in enumerate(&mut rows) {
             row.set_low().unwrap();
@@ -81,6 +85,7 @@ fn core1_task() -> ! {
                 if prev_state[nth_key] != current_state {
                     info!("Key #{} set to {}", nth_key, current_state);
                     prev_state.set(nth_key, current_state);
+                    prod.enqueue(nth_key).unwrap();
                 }
             }
             row.set_high().unwrap();
@@ -126,5 +131,13 @@ fn main() -> ! {
     let sys_freq = clocks.system_clock.freq().integer();
     sio.fifo.write(sys_freq);
 
-    loop {}
+    let (_, mut cons) = unsafe { MESSAGE_QUEUE.split() };
+
+    loop {
+        let result = cons.peek();
+        if let Some(v) = result {
+            info!("Received {}", v);
+            cons.dequeue();
+        }
+    }
 }
