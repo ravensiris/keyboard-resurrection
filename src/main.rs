@@ -16,7 +16,16 @@ use bsp::hal::{
     multicore::{Multicore, Stack},
     pac,
     sio::Sio,
+    usb::UsbBus,
     watchdog::Watchdog,
+};
+use usb_device::{
+    class_prelude::UsbBusAllocator,
+    device::{UsbDeviceBuilder, UsbVidPid},
+};
+use usbd_midi::{
+    data::usb::constants::{USB_AUDIO_CLASS, USB_MIDISTREAMING_SUBCLASS},
+    midi_device::MidiClass,
 };
 
 use bitvec::prelude::*;
@@ -131,9 +140,29 @@ fn main() -> ! {
     let sys_freq = clocks.system_clock.freq().integer();
     sio.fifo.write(sys_freq);
 
+    // Setup USB
+
+    let usb_bus = UsbBusAllocator::new(UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x5e4))
+        .product("MIDI Test")
+        .device_class(USB_AUDIO_CLASS)
+        .device_sub_class(USB_MIDISTREAMING_SUBCLASS)
+        .build();
+
+    let mut midi = MidiClass::new(&usb_bus, 1, 0).unwrap();
+
     let (_, mut cons) = unsafe { MESSAGE_QUEUE.split() };
 
     loop {
+        if !usb_dev.poll(&mut [&mut midi]) {
+            continue;
+        }
         let result = cons.peek();
         if let Some(v) = result {
             info!("Received {}", v);
