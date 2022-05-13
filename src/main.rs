@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::convert::TryFrom;
+
 use cortex_m_rt::entry;
 use defmt::*;
 use defmt_rtt as _;
@@ -24,7 +26,12 @@ use usb_device::{
     device::{UsbDeviceBuilder, UsbVidPid},
 };
 use usbd_midi::{
-    data::usb::constants::{USB_AUDIO_CLASS, USB_MIDISTREAMING_SUBCLASS},
+    data::{
+        byte::u7::U7,
+        midi::{channel::Channel, message::Message, notes::Note},
+        usb::constants::USB_CLASS_NONE,
+        usb_midi::{cable_number::CableNumber, usb_midi_event_packet::UsbMidiEventPacket},
+    },
     midi_device::MidiClass,
 };
 
@@ -32,7 +39,106 @@ use bitvec::prelude::*;
 use heapless::spsc::Queue;
 use itertools::enumerate;
 
-static mut MESSAGE_QUEUE: Queue<usize, 128> = Queue::new();
+enum SimpleMessage {
+    NoteOn(Note),
+    NoteOff(Note),
+}
+
+impl SimpleMessage {
+    fn new(is_on: bool, note: Note) -> SimpleMessage {
+        if is_on {
+            SimpleMessage::NoteOn(note)
+        } else {
+            SimpleMessage::NoteOff(note)
+        }
+    }
+}
+
+impl From<SimpleMessage> for Message {
+    fn from(msg: SimpleMessage) -> Self {
+        match msg {
+            SimpleMessage::NoteOn(note) => Message::NoteOn(Channel::Channel1, note, U7::MAX),
+            SimpleMessage::NoteOff(note) => Message::NoteOff(Channel::Channel1, note, U7::MAX),
+        }
+    }
+}
+
+impl From<SimpleMessage> for u8 {
+    fn from(msg: SimpleMessage) -> Self {
+        let (is_on_bit, note) = match msg {
+            SimpleMessage::NoteOff(note) => (0, note),
+            SimpleMessage::NoteOn(note) => (1 << 7, note),
+        };
+        let note_u8: u8 = note.into();
+        is_on_bit + note_u8
+    }
+}
+
+impl From<u8> for SimpleMessage {
+    fn from(msg: u8) -> Self {
+        let is_on = msg & (1 << 7) != 0;
+        let note: Note = Note::try_from(msg & !(1 << 7)).unwrap();
+        SimpleMessage::new(is_on, note)
+    }
+}
+
+const NOTE_MAP: [Note; 49] = [
+    Note::C0,
+    Note::Cs0,
+    Note::D0,
+    Note::Ds0,
+    Note::E0,
+    Note::F0,
+    Note::Fs0,
+    Note::G0,
+    Note::Gs0,
+    Note::A0,
+    Note::As0,
+    Note::B0,
+    //
+    Note::C1,
+    Note::Cs1,
+    Note::D1,
+    Note::Ds1,
+    Note::E1,
+    Note::F1,
+    Note::Fs1,
+    Note::G1,
+    Note::Gs1,
+    Note::A1,
+    Note::As1,
+    Note::B1,
+    //
+    Note::C2,
+    Note::Cs2,
+    Note::D2,
+    Note::Ds2,
+    Note::E2,
+    Note::F2,
+    Note::Fs2,
+    Note::G2,
+    Note::Gs2,
+    Note::A2,
+    Note::As2,
+    Note::B2,
+    //
+    Note::C3,
+    Note::Cs3,
+    Note::D3,
+    Note::Ds3,
+    Note::E3,
+    Note::F3,
+    Note::Fs3,
+    Note::G3,
+    Note::Gs3,
+    Note::A3,
+    Note::As3,
+    Note::B3,
+    //
+    Note::C4,
+];
+
+static mut MESSAGE_QUEUE: Queue<u8, 128> = Queue::new();
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 fn core1_task() -> ! {
@@ -92,9 +198,9 @@ fn core1_task() -> ! {
 
                 let current_state = col.is_low().unwrap();
                 if prev_state[nth_key] != current_state {
-                    info!("Key #{} set to {}", nth_key, current_state);
+                    let msg = SimpleMessage::new(current_state, NOTE_MAP[nth_key]);
                     prev_state.set(nth_key, current_state);
-                    prod.enqueue(nth_key).unwrap();
+                    prod.enqueue(msg.into()).unwrap();
                 }
             }
             row.set_high().unwrap();
@@ -123,7 +229,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
     // let pins = bsp::Pins::new(
     //     pac.IO_BANK0,
@@ -141,7 +247,6 @@ fn main() -> ! {
     sio.fifo.write(sys_freq);
 
     // Setup USB
-
     let usb_bus = UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -149,24 +254,31 @@ fn main() -> ! {
         true,
         &mut pac.RESETS,
     ));
+    let mut midi = MidiClass::new(&usb_bus, 1, 0).unwrap();
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x5e4))
         .product("MIDI Test")
-        .device_class(USB_AUDIO_CLASS)
-        .device_sub_class(USB_MIDISTREAMING_SUBCLASS)
+        .device_class(USB_CLASS_NONE)
         .build();
 
-    let mut midi = MidiClass::new(&usb_bus, 1, 0).unwrap();
-
     let (_, mut cons) = unsafe { MESSAGE_QUEUE.split() };
-
     loop {
-        if !usb_dev.poll(&mut [&mut midi]) {
-            continue;
-        }
-        let result = cons.peek();
-        if let Some(v) = result {
-            info!("Received {}", v);
-            cons.dequeue();
+        // HACK: No checking for polls
+        // REASON: It ain't working chief. Polls forever.
+        usb_dev.poll(&mut [&mut midi]);
+        if let Some(msg_u8) = cons.peek() {
+            let msg: SimpleMessage = (*msg_u8).into();
+            if midi
+                .send_message(UsbMidiEventPacket::from_midi(
+                    CableNumber::Cable0,
+                    msg.into(),
+                ))
+                .is_ok()
+            {
+                info!("Sent message {}", msg_u8);
+                cons.dequeue();
+            } else {
+                error!("Failed to send message {}", msg_u8);
+            }
         }
     }
 }
