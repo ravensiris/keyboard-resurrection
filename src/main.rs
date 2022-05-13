@@ -19,6 +19,9 @@ use bsp::hal::{
     watchdog::Watchdog,
 };
 
+use bitvec::prelude::*;
+use itertools::enumerate;
+
 static mut CORE1_STACK: Stack<4096> = Stack::new();
 fn core1_task() -> ! {
     let mut pac = unsafe { pac::Peripherals::steal() };
@@ -61,13 +64,27 @@ fn core1_task() -> ! {
         row.set_high().unwrap();
     }
 
-    rows[0].set_low().unwrap();
-    let mut last_state = false;
+    let mut prev_state = bitarr![u32, Lsb0; 0; 49];
     loop {
-        let current_state = cols[4].is_low().unwrap();
-        if current_state != last_state {
-            info!("{} => {}", last_state, current_state);
-            last_state = current_state;
+        for (n_row, row) in enumerate(&mut rows) {
+            row.set_low().unwrap();
+            for (n_col, col) in enumerate(&cols) {
+                let mut nth_key = n_row * 8 + n_col;
+
+                // skip first 4 keys that don't exist
+                if nth_key < 4 {
+                    continue;
+                }
+                nth_key -= 4;
+
+                let current_state = col.is_low().unwrap();
+                if prev_state[nth_key] != current_state {
+                    info!("Key #{} set to {}", nth_key, current_state);
+                    prev_state.set(nth_key, current_state);
+                }
+            }
+            row.set_high().unwrap();
+            delay.delay_us(1);
         }
     }
 }
@@ -92,7 +109,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+    let mut _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
     // let pins = bsp::Pins::new(
     //     pac.IO_BANK0,
