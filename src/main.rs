@@ -229,7 +229,7 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
+    let mut _delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().integer());
 
     // let pins = bsp::Pins::new(
     //     pac.IO_BANK0,
